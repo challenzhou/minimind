@@ -72,19 +72,26 @@ def setup_seed(seed):
 
 def build_model(lm_config, from_weight, save_dir, device):
     """Load tokenizer and model, optionally load pretrained weights."""
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(os.path.dirname(__file__), '../model'),
-        trust_remote_code=True
-    )
+
+    # Try minimind3 tokenizer first, then fallback to built-in model tokenizer
+    tokenizer_path = os.path.join(save_dir, 'tokenizer_minimind3')
+    if not os.path.exists(tokenizer_path):
+        tokenizer_path = os.path.join(os.path.dirname(__file__), '../model')
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
     model = MiniMindForCausalLM(lm_config).to(device)
 
     if from_weight and from_weight != 'none':
         moe_suffix = '_moe' if lm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        weight_path = f'{save_dir}/{from_weight}{moe_suffix}.pth'
         if os.path.exists(weight_path):
             logger(f"Loading weights from {weight_path}")
             state_dict = torch.load(weight_path, map_location=device)
-            model.load_state_dict(state_dict, strict=False)
+            result = model.load_state_dict(state_dict, strict=False)
+            if result.missing_keys:
+                logger(f"  Missing keys: {result.missing_keys[:5]}...")
+            if result.unexpected_keys:
+                logger(f"  Unexpected keys: {result.unexpected_keys[:5]}...")
         else:
             logger(f"[WARN] Weight file not found: {weight_path}, training from scratch")
 

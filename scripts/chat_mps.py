@@ -1,16 +1,18 @@
 """
 MPS-aware interactive chat script for MiniMind on Apple Silicon.
-Works with both pretrain weights (raw completion) and SFT/LoRA weights (chat format).
+Supports two formats:
+  1. minimind-3 (Qwen3ForCausalLM, HuggingFace safetensors) — base model
+  2. MiniMind (MiniMindForCausalLM, .pth) — custom trained weights
 
 Usage:
-    # Pretrain mode (raw text completion):
-    python scripts/chat_mps.py --weight notes_pretrain --mode pretrain
+    # minimind-3 base model (Qwen3, no fine-tuning):
+    python scripts/chat_mps.py --model minimind3
 
-    # SFT/LoRA mode (chat format):
-    python scripts/chat_mps.py --weight notes_sft --mode sft
+    # Pretrain weights trained from scratch (MiniMind, .pth):
+    python scripts/chat_mps.py --model minimind --weight notes_pretrain
 
-    # With custom path:
-    python scripts/chat_mps.py --weight full_sft --save_dir out --mode sft
+    # Full SFT weights if trained (MiniMind, .pth):
+    python scripts/chat_mps.py --model minimind --weight full_sft --mode sft
 """
 import os
 import sys
@@ -20,7 +22,7 @@ import warnings
 import random
 
 import torch
-from transformers import AutoTokenizer, TextStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 
 __package__ = "scripts"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -39,55 +41,75 @@ def get_device():
     return "cpu"
 
 
-def init_model(args):
+def load_minimind3(args):
+    """Load minimind-3 (Qwen3-based) from HuggingFace format."""
     device = get_device()
     print(f"Device: {device}")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True)
+    minimind3_path = os.path.join(args.base_dir, 'out/gongjy/minimind-3')
+    print(f"Loading minimind-3 from {minimind3_path} ...")
+
+    tokenizer = AutoTokenizer.from_pretrained(minimind3_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        minimind3_path,
+        trust_remote_code=True,
+        dtype=torch.float16,
+    )
+    model = model.to(device).eval()
+    total = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"Model loaded: {total:.2f}M params ({total/1000:.2f}B)")
+    return model, tokenizer, device
+
+
+def load_minimind(args):
+    """Load MiniMind (custom trained) from .pth weights."""
+    device = get_device()
+    print(f"Device: {device}")
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        os.path.join(args.base_dir, 'model'),
+        trust_remote_code=True
+    )
 
     lm_config = MiniMindConfig(
         hidden_size=args.hidden_size,
         num_hidden_layers=args.num_hidden_layers,
         use_moe=bool(args.use_moe)
     )
-
     model = MiniMindForCausalLM(lm_config)
 
-    moe_suffix = '_moe' if args.use_moe else ''
-    weight_path = f'{args.save_dir}/{args.weight}{moe_suffix}.pth'
+    weight_path = os.path.join(args.base_dir, f"out/{args.weight}.pth")
     if not os.path.exists(weight_path):
-        # Try without suffix
-        weight_path = f'{args.save_dir}/{args.weight}.pth'
-
+        raise FileNotFoundError(f"Weight not found: {weight_path}")
     print(f"Loading weights from {weight_path} ...")
     state_dict = torch.load(weight_path, map_location=device)
     model.load_state_dict(state_dict, strict=False)
     del state_dict
-    torch.mps.empty_cache() if device == 'mps' else torch.cuda.empty_cache()
 
     if args.lora_weight and args.lora_weight != 'None':
         print(f"Applying LoRA: {args.lora_weight}")
         apply_lora(model)
-        lora_path = f'{args.save_dir}/{args.lora_weight}.pth'
+        lora_path = os.path.join(args.base_dir, f"out/{args.lora_weight}.pth")
         load_lora(model, lora_path)
 
     model = model.half().eval().to(device)
-
     total = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Model loaded: {total:.2f}M params")
     return model, tokenizer, device
 
 
 def chat_loop(model, tokenizer, device, args):
-    """Interactive chat loop."""
-    conversation = []
-
     print("\n" + "=" * 60)
     print("MiniMind Chat (Apple Silicon MPS)")
     print("Commands: /reset, /quit, /context")
     print("=" * 60 + "\n")
 
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    conversation = []
+
+    # Set pad token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     while True:
         try:
@@ -98,7 +120,6 @@ def chat_loop(model, tokenizer, device, args):
 
         if not user_input:
             continue
-
         if user_input == '/quit':
             print("Goodbye!")
             break
@@ -114,22 +135,30 @@ def chat_loop(model, tokenizer, device, args):
 
         conversation.append({"role": "user", "content": user_input})
 
-        if args.mode == 'pretrain' or 'pretrain' in args.weight:
-            # Pretrain mode: raw completion
-            prompt = tokenizer.bos_token + user_input
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
-        else:
-            # SFT/LoRA mode: chat template
+        # Build prompt
+        if args.model == 'minimind3':
+            # Qwen3 uses chat template
             prompt_text = tokenizer.apply_chat_template(
                 conversation,
                 tokenize=False,
                 add_generation_prompt=True
             )
-            inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True).to(device)
+        else:
+            # MiniMind custom — raw completion or chat template
+            if args.mode == 'sft':
+                prompt_text = tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            else:
+                prompt_text = (tokenizer.bos_token or '') + user_input
+
+        inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True).to(device)
 
         print("\u1d4d\u200d: ", end='', flush=True)
 
-        setup_seed(random.randint(0, 31415926))
+        torch.manual_seed(random.randint(0, 31415926))
         st = time.time()
 
         with torch.no_grad():
@@ -143,16 +172,13 @@ def chat_loop(model, tokenizer, device, args):
                 eos_token_id=tokenizer.eos_token_id,
                 top_p=args.top_p,
                 temperature=args.temperature,
-                repetition_penalty=1.1
+                repetition_penalty=1.1,
             )
 
         response = tokenizer.decode(
             generated_ids[0][len(inputs["input_ids"][0]):],
             skip_special_tokens=True
         ).strip()
-
-        if not streamer:
-            print(response, end='', flush=True)
 
         gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
         elapsed = time.time() - st
@@ -161,7 +187,6 @@ def chat_loop(model, tokenizer, device, args):
 
         conversation.append({"role": "assistant", "content": response})
 
-        # Memory check
         if device == 'mps':
             mem_allocated = torch.mps.current_allocated_memory() / 1024**3
             print(f"[MPS memory: {mem_allocated:.2f} GB]")
@@ -169,40 +194,35 @@ def chat_loop(model, tokenizer, device, args):
 
 def main():
     parser = argparse.ArgumentParser(description="MiniMind MPS Chat")
+    parser.add_argument('--model', default='minimind3',
+                        choices=['minimind3', 'minimind'],
+                        help="Model format: minimind3=Qwen3(HF), minimind=MiniMind(.pth)")
     parser.add_argument('--weight', default='notes_pretrain', type=str,
-                        help="Weight name prefix (without .pth)")
-    parser.add_argument('--save_dir', default='../out', type=str,
-                        help="Directory containing weights")
-    parser.add_argument('--tokenizer_path', default='../model', type=str,
-                        help="Tokenizer directory")
+                        help="Weight name for minimind model")
+    parser.add_argument('--tokenizer_path', default=None, type=str,
+                        help="Tokenizer path (defaults to model path)")
     parser.add_argument('--mode', default='sft', choices=['pretrain', 'sft'],
-                        help="Generation mode: pretrain=raw completion, sft=chat")
+                        help="Generation mode (only for minimind)")
     parser.add_argument('--lora_weight', default=None, type=str,
-                        help="LoRA weight name (optional)")
-    parser.add_argument('--hidden_size', default=512, type=int,
-                        help="Model hidden dimension")
-    parser.add_argument('--num_hidden_layers', default=4, type=int,
-                        help="Number of layers")
-    parser.add_argument('--use_moe', default=0, type=int,
-                        help="Use MoE architecture")
-    parser.add_argument('--max_new_tokens', default=512, type=int,
-                        help="Max tokens to generate")
-    parser.add_argument('--temperature', default=0.85, type=float,
-                        help="Sampling temperature")
-    parser.add_argument('--top_p', default=0.95, type=float,
-                        help="Nucleus sampling threshold")
+                        help="LoRA weight name (only for minimind)")
+    parser.add_argument('--hidden_size', default=512, type=int)
+    parser.add_argument('--num_hidden_layers', default=4, type=int)
+    parser.add_argument('--use_moe', default=0, type=int)
+    parser.add_argument('--max_new_tokens', default=512, type=int)
+    parser.add_argument('--temperature', default=0.85, type=float)
+    parser.add_argument('--top_p', default=0.95, type=float)
     args = parser.parse_args()
 
-    # Resolve paths relative to script dir
+    # Resolve base_dir (parent of minimind/)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    minimind_root = os.path.dirname(script_dir)
+    minimind_root = os.path.dirname(script_dir)  # minimind/
+    args.base_dir = minimind_root
 
-    for arg_name in ['save_dir', 'tokenizer_path']:
-        val = getattr(args, arg_name)
-        if not os.path.isabs(val):
-            setattr(args, arg_name, os.path.join(minimind_root, val))
+    if args.model_type == 'minimind3':
+        model, tokenizer, device = load_minimind3(args)
+    else:
+        model, tokenizer, device = load_minimind(args)
 
-    model, tokenizer, device = init_model(args)
     chat_loop(model, tokenizer, device, args)
 
 
