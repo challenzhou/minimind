@@ -57,14 +57,21 @@ def load_minimind3(args):
     model = AutoModelForCausalLM.from_pretrained(
         minimind3_path,
         trust_remote_code=True,
-        dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
     )
 
     if args.lora_weight and args.lora_weight != 'None':
         lora_path = os.path.join(args.base_dir, 'out', f"{args.lora_weight}.pth")
-        print(f"Merging LoRA from {lora_path} ...")
-        from peft import LoraConfig
-        model = PeftModel.from_pretrained(model, lora_path)
+        print(f"Loading LoRA from {lora_path} ...")
+        from peft import LoraConfig, get_peft_model
+        lora_config = LoraConfig(
+            r=16, lora_alpha=32, lora_dropout=0.05,
+            target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj',
+                           'gate_proj', 'up_proj', 'down_proj'],
+            bias='none', task_type='CAUSAL_LM'
+        )
+        model = get_peft_model(model, lora_config)
+        model.load_state_dict(torch.load(lora_path, map_location='cpu'), strict=False)
         model = model.merge_and_unload()
         print("LoRA merged into base model")
 
@@ -231,7 +238,7 @@ def main():
     minimind_root = os.path.dirname(script_dir)  # minimind/
     args.base_dir = minimind_root
 
-    if args.model_type == 'minimind3':
+    if args.model == 'minimind3':
         model, tokenizer, device = load_minimind3(args)
     else:
         model, tokenizer, device = load_minimind(args)
