@@ -255,9 +255,9 @@ def main():
                         help="Random seed")
     args = parser.parse_args()
 
-    # Resolve paths
+    # Resolve paths relative to minimind root
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    minimind_root = os.path.dirname(script_dir)
+    minimind_root = os.path.dirname(script_dir)  # goes from scripts/ -> minimind/
     save_dir = args.save_dir if os.path.isabs(args.save_dir) else os.path.join(minimind_root, args.save_dir)
     data_path = args.data_path if os.path.isabs(args.data_path) else os.path.join(minimind_root, args.data_path)
     os.makedirs(save_dir, exist_ok=True)
