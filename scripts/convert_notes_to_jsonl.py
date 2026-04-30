@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 Convert user's notes (.ipynb / .md) to MiniMind pretrain jsonl format.
 Usage: python convert_notes_to_jsonl.py [--notes_dir /path/to/notes] [--output dataset/notes_pretrain.jsonl] [--chunk_chars 2000]

@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 LoRA fine-tuning on Apple Silicon (MPS) using HuggingFace PEFT on minimind3 (Qwen3).
 

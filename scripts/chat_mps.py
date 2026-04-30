@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 MPS-aware interactive chat script for MiniMind on Apple Silicon.
 Supports two formats:
