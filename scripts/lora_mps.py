@@ -115,6 +115,19 @@ def get_lr(step, total_steps, lr):
     return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * step / total_steps)))
 
 
+def prune_checkpoints(save_name, save_dir, max_keep=3):
+    """Remove all step checkpoints for save_name except the most recent max_keep."""
+    import glob
+    pattern = os.path.join(save_dir, f"{save_name}_step_*.pth")
+    checkpoints = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    removed = 0
+    for ckpt in checkpoints[max_keep:]:
+        os.remove(ckpt)
+        removed += 1
+    if removed:
+        print(f"Pruned {removed} old checkpoint(s) — kept {max_keep} most recent")
+
+
 def train_epoch(model, loader, optimizer, scaler, autocast_ctx, args, iters, start_step=0, epoch=0):
     model.train()
     step = start_step
@@ -156,6 +169,8 @@ def train_epoch(model, loader, optimizer, scaler, autocast_ctx, args, iters, sta
             save_path = os.path.join(args.save_dir, f"{args.save_name}_step_{step+1}.pth")
             torch.save(model.state_dict(), save_path)
             print(f"Checkpoint saved: {save_path}")
+            if args.max_keep > 0:
+                prune_checkpoints(args.save_name, args.save_dir, args.max_keep)
 
         step += 1
 
@@ -177,6 +192,8 @@ def main():
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--log_interval', type=int, default=50)
     parser.add_argument('--save_interval', type=int, default=1000)
+    parser.add_argument('--max_keep', type=int, default=3,
+                        help='Max step checkpoints to keep (prunes oldest, default: 3, 0=keep all)')
     parser.add_argument('--lora_rank', type=int, default=16)
     parser.add_argument('--lora_alpha', type=int, default=32)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
@@ -208,7 +225,7 @@ def main():
     print(f"Loading minimind3 from {minimind3_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(minimind3_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        minimind3_path, trust_remote_code=True, dtype=dtype
+        minimind3_path, trust_remote_code=True, torch_dtype=dtype
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
