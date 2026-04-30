@@ -23,6 +23,7 @@ import random
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+from peft import PeftModel
 
 __package__ = "scripts"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -42,7 +43,7 @@ def get_device():
 
 
 def load_minimind3(args):
-    """Load minimind-3 (Qwen3-based) from HuggingFace format."""
+    """Load minimind-3 (Qwen3-based) from HuggingFace format, optionally with LoRA."""
     device = get_device()
     print(f"Device: {device}")
 
@@ -50,11 +51,23 @@ def load_minimind3(args):
     print(f"Loading minimind-3 from {minimind3_path} ...")
 
     tokenizer = AutoTokenizer.from_pretrained(minimind3_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     model = AutoModelForCausalLM.from_pretrained(
         minimind3_path,
         trust_remote_code=True,
         dtype=torch.float16,
     )
+
+    if args.lora_weight and args.lora_weight != 'None':
+        lora_path = os.path.join(args.base_dir, 'out', f"{args.lora_weight}.pth")
+        print(f"Merging LoRA from {lora_path} ...")
+        from peft import LoraConfig
+        model = PeftModel.from_pretrained(model, lora_path)
+        model = model.merge_and_unload()
+        print("LoRA merged into base model")
+
     model = model.to(device).eval()
     total = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Model loaded: {total:.2f}M params ({total/1000:.2f}B)")
